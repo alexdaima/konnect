@@ -1,0 +1,43 @@
+{
+  "$schema": "https://raw.githubusercontent.com/alexdaima/konnect/v0.1.0/schemas/konnect.config.schema.json",
+  "proxy": {
+    "port": 1355
+  },
+  "contexts": {
+    "ignore": ["context-name"]
+  },
+  "clusters": {
+    "all": {
+      "service": [
+        {
+          "name": "all-clusters-app",
+          "namespace": "namespace",
+          "target": "svc/service-name",
+          "remote_port": 3000
+        }
+      ]
+    },
+    "usa-region": {
+      "context": "arn:aws:eks:region:0123456789:cluster/cluster-name",
+      "service": [
+        {
+          "name": "usa-app",
+          "namespace": "namespace",
+          "target": "svc/service-name",
+          "remote_port": 3000
+        }
+      ]
+    },
+    "china-region": {
+      "context": "arn:aws-cn:eks:region:0123456789:cluster/cluster-name",
+      "service": [
+        {
+          "name": "china-app",
+          "namespace": "namespace",
+          "target": "svc/service-name",
+          "remote_port": 3000
+        }
+      ]
+    }
+  }
+}

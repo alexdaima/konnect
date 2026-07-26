@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "clusters": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/Cluster"
+      }
+    },
+    "contexts": {
+      "$ref": "#/$defs/ContextsConfig"
+    },
+    "proxy": {
+      "$ref": "#/$defs/ProxyConfig"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "Cluster": {
+      "type": "object",
+      "properties": {
+        "context": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "service": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Service"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ContextsConfig": {
+      "type": "object",
+      "properties": {
+        "ignore": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProxyConfig": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 1355,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "Service": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "pod": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "remote_port": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "service": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "target": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "remote_port"
+      ]
+    }
+  }
+}
