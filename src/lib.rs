@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    ffi::OsString,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{
@@ -244,13 +245,31 @@ fn validate_label(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn config_path() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("KONNECT_CONFIG") {
+/// Resolve the configuration file to load.
+///
+/// `explicit` is the `--config` argument, which wins over everything else.
+/// `KONNECT_CONFIG` comes next, and otherwise the per-user default is used.
+pub fn config_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_config_path(
+        explicit,
+        env::var_os("KONNECT_CONFIG"),
+        env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")),
+    )
+}
+
+fn resolve_config_path(
+    explicit: Option<PathBuf>,
+    configured: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    if let Some(path) = configured {
         return Ok(PathBuf::from(path));
     }
-    let home = env::var_os("HOME")
-        .or_else(|| env::var_os("USERPROFILE"))
-        .context("HOME is not set; use KONNECT_CONFIG to set a config path")?;
+    let home =
+        home.context("HOME is not set; use --config or KONNECT_CONFIG to set a config path")?;
     Ok(PathBuf::from(home).join(".konnect").join("config.json"))
 }
 
@@ -702,6 +721,42 @@ async fn respond(client: &mut TcpStream, status: u16, message: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_flag_wins_over_environment_and_home() {
+        let path = resolve_config_path(
+            Some(PathBuf::from("/repo/konnect.json")),
+            Some(OsString::from("/env/konnect.json")),
+            Some(OsString::from("/home/alex")),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/repo/konnect.json"));
+    }
+
+    #[test]
+    fn environment_wins_over_the_per_user_config() {
+        let path = resolve_config_path(
+            None,
+            Some(OsString::from("/env/konnect.json")),
+            Some(OsString::from("/home/alex")),
+        )
+        .unwrap();
+        assert_eq!(path, PathBuf::from("/env/konnect.json"));
+    }
+
+    #[test]
+    fn falls_back_to_the_per_user_config() {
+        let path = resolve_config_path(None, None, Some(OsString::from("/home/alex"))).unwrap();
+        assert_eq!(path, PathBuf::from("/home/alex/.konnect/config.json"));
+    }
+
+    #[test]
+    fn reports_how_to_set_a_config_without_a_home_directory() {
+        let error = resolve_config_path(None, None, None).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("--config"), "{message}");
+        assert!(message.contains("KONNECT_CONFIG"), "{message}");
+    }
 
     #[test]
     fn checked_in_example_config_is_valid() {
