@@ -22,6 +22,9 @@ mod tray {
 #[derive(Debug, Parser)]
 #[command(version, about = "Named local routes for Kubernetes port forwards")]
 struct Cli {
+    /// Path to the configuration file, overriding KONNECT_CONFIG.
+    #[arg(long, short, value_name = "PATH", global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -42,7 +45,7 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let path = config_path()?;
+    let path = config_path(cli.config)?;
     match cli.command {
         Some(Command::Init { force }) => init(path, force),
         Some(Command::List) => list(&path),
