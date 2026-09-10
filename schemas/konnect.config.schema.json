@@ -73,6 +73,17 @@
     "Service": {
       "type": "object",
       "properties": {
+        "local_port": {
+          "description": "Bind this service to a fixed local TCP port that is relayed byte for byte.\n\nNamed `<cluster>.<service>.localhost` routes on the shared proxy port only\nwork for protocols that name their destination, which in practice means\nHTTP. Protocols that do not, such as the PostgreSQL wire protocol, need a\nport of their own.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
         "name": {
           "type": [
             "string",

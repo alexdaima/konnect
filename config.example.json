@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/alexdaima/konnect/v0.1.0/schemas/konnect.config.schema.json",
+  "$schema": "./konnect.config.schema.json",
   "proxy": {
     "port": 1355
   },
@@ -25,6 +25,13 @@
           "namespace": "namespace",
           "target": "svc/service-name",
           "remote_port": 3000
+        },
+        {
+          "name": "usa-postgres",
+          "namespace": "namespace",
+          "target": "svc/postgres",
+          "remote_port": 5432,
+          "local_port": 15432
         }
       ]
     },
@@ -36,6 +43,13 @@
           "namespace": "namespace",
           "target": "svc/service-name",
           "remote_port": 3000
+        },
+        {
+          "name": "china-postgres",
+          "namespace": "namespace",
+          "target": "svc/postgres",
+          "remote_port": 5432,
+          "local_port": 15433
         }
       ]
     }

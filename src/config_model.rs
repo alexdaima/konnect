@@ -68,4 +68,12 @@ pub struct Service {
     pub service: Option<String>,
     #[serde(default)]
     pub pod: Option<String>,
+    /// Bind this service to a fixed local TCP port that is relayed byte for byte.
+    ///
+    /// Named `<cluster>.<service>.localhost` routes on the shared proxy port only
+    /// work for protocols that name their destination, which in practice means
+    /// HTTP. Protocols that do not, such as the PostgreSQL wire protocol, need a
+    /// port of their own.
+    #[serde(default)]
+    pub local_port: Option<u16>,
 }

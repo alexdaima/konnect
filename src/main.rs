@@ -80,13 +80,17 @@ fn list(path: &std::path::Path) -> Result<()> {
     let config = Config::load(path)?;
     let contexts = kube_contexts()?;
     for forward in config.forwards_for_contexts(&contexts)? {
+        let address = match forward.local_port {
+            Some(port) => format!("127.0.0.1:{port}"),
+            None => format!(
+                "http://{}:{}",
+                browser_host(&forward.route),
+                config.proxy.port
+            ),
+        };
         println!(
-            "{:<36} http://{}:{}  {} ({})",
-            forward.route,
-            browser_host(&forward.route),
-            config.proxy.port,
-            forward.target,
-            forward.context,
+            "{:<36} {address:<40} {} ({})",
+            forward.route, forward.target, forward.context,
         );
     }
     Ok(())
