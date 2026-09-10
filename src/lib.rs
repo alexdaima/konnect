@@ -40,6 +40,9 @@ pub struct ForwardSpec {
     pub namespace: String,
     pub target: String,
     pub remote_port: u16,
+    /// Fixed local port relayed byte for byte, for protocols the named routes
+    /// cannot serve.
+    pub local_port: Option<u16>,
 }
 
 impl Config {
@@ -61,6 +64,17 @@ impl Config {
                 if cluster.context.is_some() {
                     bail!("clusters.all must not define a context");
                 }
+                if let Some(service) = cluster
+                    .services
+                    .iter()
+                    .find(|service| service.local_port.is_some())
+                {
+                    let service = service.route_name()?;
+                    bail!(
+                        "clusters.all service {service} must not set local_port, because every \
+                         cluster would bind the same port; set it on each cluster instead"
+                    );
+                }
             } else {
                 validate_label("cluster key", name)?;
                 let Some(context) = &cluster.context else {
@@ -71,6 +85,16 @@ impl Config {
                 }
             }
             validate_services(&format!("clusters.{name}"), &cluster.services)?;
+            for service in &cluster.services {
+                if service.local_port == Some(self.proxy.port) {
+                    let service = service.route_name()?;
+                    bail!(
+                        "clusters.{name} service {service} uses local_port {}, which is already \
+                         the proxy port",
+                        self.proxy.port
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -134,6 +158,7 @@ impl Config {
     pub fn forwards_for_contexts(&self, contexts: &[String]) -> Result<Vec<ForwardSpec>> {
         let mut forwards = Vec::new();
         let mut routes = HashMap::new();
+        let mut local_ports = HashMap::new();
         for context in contexts {
             if self.ignored_context(context) {
                 continue;
@@ -145,6 +170,14 @@ impl Config {
                     bail!(
                         "contexts {previous:?} and {:?} produce the same route {}",
                         forward.context,
+                        forward.route
+                    );
+                }
+                if let Some(local_port) = forward.local_port
+                    && let Some(previous) = local_ports.insert(local_port, forward.route.clone())
+                {
+                    bail!(
+                        "routes {previous} and {} both use local_port {local_port}",
                         forward.route
                     );
                 }
@@ -166,6 +199,9 @@ fn validate_services(scope: &str, services: &[Service]) -> Result<()> {
         if service.remote_port == 0 {
             bail!("{scope} service {name} has an invalid remote_port");
         }
+        if service.local_port == Some(0) {
+            bail!("{scope} service {name} has an invalid local_port");
+        }
         service.target_name()?;
         if names.insert(name.clone(), ()).is_some() {
             bail!("{scope} defines service {name} more than once");
@@ -181,6 +217,7 @@ fn forward_spec(cluster_name: &str, context: &str, service: &Service) -> Result<
         namespace: service.namespace.clone(),
         target: service.target_name()?,
         remote_port: service.remote_port,
+        local_port: service.local_port,
     })
 }
 
@@ -454,6 +491,31 @@ pub async fn start_runtime(forwards: &[ForwardSpec], proxy_port: u16) -> Result<
 
     let (shutdown, shutdown_rx) = watch::channel(false);
     let transfer_stats = TransferStats::default();
+
+    for forward in forwards {
+        let Some(local_port) = forward.local_port else {
+            continue;
+        };
+        let raw_listener = TcpListener::bind(("127.0.0.1", local_port))
+            .await
+            .with_context(|| {
+                format!("could not bind {} on 127.0.0.1:{local_port}", forward.route)
+            })?;
+        let state = routes
+            .read()
+            .await
+            .get(&forward.route)
+            .cloned()
+            .expect("route registered above");
+        tokio::spawn(run_raw_listener(
+            forward.route.clone(),
+            raw_listener,
+            state,
+            shutdown.subscribe(),
+            transfer_stats.clone(),
+        ));
+    }
+
     tokio::spawn(run_proxy(
         listener,
         routes.clone(),
@@ -586,6 +648,76 @@ async fn run_proxy(
             }
         }
     }
+}
+
+/// Relay a fixed local port straight through to its port-forward.
+///
+/// Unlike [`proxy_connection`], nothing is parsed: the first bytes a client sends
+/// are forwarded untouched. That is what lets protocols which never name their
+/// destination — the PostgreSQL wire protocol, MySQL, Redis, plain TCP — work at
+/// all, at the cost of one port per route.
+async fn run_raw_listener(
+    route: String,
+    listener: TcpListener,
+    state: Arc<RwLock<RouteState>>,
+    mut shutdown: watch::Receiver<bool>,
+    transfer_stats: TransferStats,
+) -> Result<()> {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => return Ok(()),
+            accepted = listener.accept() => {
+                let (stream, address) = accepted
+                    .with_context(|| format!("failed to accept connection for {route}"))?;
+                let route = route.clone();
+                let state = state.clone();
+                let transfer_stats = transfer_stats.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = raw_connection(stream, state, transfer_stats).await {
+                        eprintln!("{route} {address}: {error}");
+                    }
+                });
+            }
+        }
+    }
+}
+
+async fn raw_connection(
+    client: TcpStream,
+    state: Arc<RwLock<RouteState>>,
+    transfer_stats: TransferStats,
+) -> Result<()> {
+    let port = wait_for_route_port(&state)
+        .await
+        .context("route is not connected")?;
+    let upstream = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port)))
+        .await
+        .with_context(|| format!("could not reach the port-forward on 127.0.0.1:{port}"))?;
+    let mut client = CountingStream::new(client, transfer_stats.sent.clone());
+    let mut upstream = CountingStream::new(upstream, transfer_stats.received.clone());
+    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+        .await
+        .context("relay failed")?;
+    Ok(())
+}
+
+/// Wait briefly for `kubectl port-forward` to report its local port.
+///
+/// A raw client has no way to be told "still connecting", the way an HTTP client
+/// gets a 503, so a connection made moments after startup waits rather than
+/// failing outright.
+async fn wait_for_route_port(state: &Arc<RwLock<RouteState>>) -> Option<u16> {
+    const ATTEMPTS: u32 = 100;
+    const INTERVAL: Duration = Duration::from_millis(100);
+    for attempt in 0..ATTEMPTS {
+        if let Some(port) = state.read().await.port {
+            return Some(port);
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::time::sleep(INTERVAL).await;
+        }
+    }
+    None
 }
 
 async fn proxy_connection(
@@ -914,6 +1046,166 @@ mod tests {
             parse_forwarded_port("Forwarding from 127.0.0.1:49152 -> 8080"),
             Some(49152)
         );
+    }
+
+    #[tokio::test]
+    async fn binds_a_dedicated_listener_for_each_raw_route() {
+        let scratch = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind scratch listener: {error}"),
+        };
+        let local_port = scratch.local_addr().unwrap().port();
+        drop(scratch);
+
+        let spec = ForwardSpec {
+            route: "usa.pg".to_owned(),
+            context: "usa-ctx".to_owned(),
+            namespace: "db".to_owned(),
+            target: "svc/pg".to_owned(),
+            remote_port: 5432,
+            local_port: Some(local_port),
+        };
+        let runtime = match start_runtime(std::slice::from_ref(&spec), 0).await {
+            Ok(runtime) => runtime,
+            Err(error) => panic!("failed to start runtime: {error}"),
+        };
+
+        TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], local_port)))
+            .await
+            .expect("the raw route should be listening on its configured port");
+        drop(runtime);
+    }
+
+    #[tokio::test]
+    async fn relays_a_raw_tcp_connection_without_parsing_it() {
+        // A PostgreSQL startup packet: a length prefix, protocol version 3.0, then
+        // null-terminated parameters. There is no Host header and no \r\n\r\n, which
+        // is precisely why these connections cannot use the shared proxy port.
+        const STARTUP: &[u8] =
+            b"\x00\x00\x00\x26\x00\x03\x00\x00user\x00alex\x00database\x00nightly\x00\x00";
+        const AUTH_OK: &[u8] = b"R\x00\x00\x00\x08\x00\x00\x00\x00";
+        let upstream_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind upstream listener: {error}"),
+        };
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.unwrap();
+            let mut received = [0_u8; 512];
+            let count = stream.read(&mut received).await.unwrap();
+            assert_eq!(&received[..count], STARTUP, "startup packet was altered");
+            stream.write_all(AUTH_OK).await.unwrap();
+        });
+
+        let state = Arc::new(RwLock::new(RouteState {
+            port: Some(upstream_port),
+        }));
+        let raw_listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind raw listener: {error}"),
+        };
+        let raw_address = raw_listener.local_addr().unwrap();
+        let transfer_stats = TransferStats::default();
+        let relay_stats = transfer_stats.clone();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = raw_listener.accept().await.unwrap();
+            raw_connection(stream, state, relay_stats).await.unwrap();
+        });
+
+        let mut client = TcpStream::connect(raw_address).await.unwrap();
+        client.write_all(STARTUP).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, AUTH_OK);
+        upstream.await.unwrap();
+        relay.await.unwrap();
+    }
+
+    #[test]
+    fn rejects_a_local_port_shared_by_two_routes() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "clusters": {
+                    "usa": {
+                        "context": "usa-ctx",
+                        "service": [{"name": "pg", "namespace": "db", "service": "pg", "remote_port": 5432, "local_port": 15432}]
+                    },
+                    "china": {
+                        "context": "china-ctx",
+                        "service": [{"name": "pg", "namespace": "db", "service": "pg", "remote_port": 5432, "local_port": 15432}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let error = config
+            .forwards_for_contexts(&["usa-ctx".to_owned(), "china-ctx".to_owned()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("15432"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_local_port_on_the_shared_cluster() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "clusters": {
+                    "all": {
+                        "service": [{"name": "pg", "namespace": "db", "service": "pg", "remote_port": 5432, "local_port": 15432}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("local_port"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_local_port_that_is_the_proxy_port() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "proxy": {"port": 1355},
+                "clusters": {
+                    "usa": {
+                        "context": "usa-ctx",
+                        "service": [{"name": "pg", "namespace": "db", "service": "pg", "remote_port": 5432, "local_port": 1355}]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("proxy port"), "{error}");
+    }
+
+    #[test]
+    fn carries_local_port_onto_the_forward() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "clusters": {
+                    "usa": {
+                        "context": "usa-ctx",
+                        "service": [
+                            {"name": "pg", "namespace": "db", "service": "pg", "remote_port": 5432, "local_port": 15432},
+                            {"name": "api", "namespace": "web", "service": "api", "remote_port": 8080}
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        config.validate().unwrap();
+        let forwards = config.forwards_for_context("usa-ctx").unwrap();
+        let pg = forwards.iter().find(|f| f.route == "usa.pg").unwrap();
+        let api = forwards.iter().find(|f| f.route == "usa.api").unwrap();
+        assert_eq!(pg.local_port, Some(15432));
+        assert_eq!(api.local_port, None);
     }
 
     #[tokio::test]

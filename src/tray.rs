@@ -16,10 +16,7 @@ use konnect::{
 use system_status_bar_macos::{LoopTerminator, Menu, MenuItem, StatusItem, sync_event_loop};
 use tokio::runtime::Runtime;
 
-const STATUS_ICON: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/assets/logo.png"
-));
+const STATUS_ICON: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/logo.png"));
 const STATUS_ICON_FALLBACK: &str = "\u{2388}";
 const TRANSFER_STATS_ITEM_INDEX: usize = 1;
 
@@ -40,6 +37,7 @@ struct TrayApp {
     status_item: Option<StatusItem>,
     routes: HashMap<String, ForwardSpec>,
     active_routes: HashSet<String>,
+    raw_ports: HashMap<String, u16>,
     transfer_stats: TransferStats,
     commands: Sender<Command>,
 }
@@ -154,7 +152,11 @@ impl TrayApp {
             routes.sort();
             items.extend(routes.into_iter().map(|route| {
                 let route = route.to_owned();
-                let url = active_url(&route, self.config.proxy.port);
+                let url = active_url(
+                    &route,
+                    self.config.proxy.port,
+                    self.raw_ports.get(&route).copied(),
+                );
                 let copy_url = url.clone();
                 let copy_commands = self.commands.clone();
                 let stop_route = route.clone();
@@ -250,6 +252,10 @@ impl TrayApp {
 pub fn run(config: Config) -> Result<()> {
     let contexts = configured_contexts(&config, kube_contexts()?);
     let forwards = config.forwards_for_contexts(&contexts)?;
+    let raw_ports: HashMap<String, u16> = forwards
+        .iter()
+        .filter_map(|forward| Some((forward.route.clone(), forward.local_port?)))
+        .collect();
     let runtime = Runtime::new().context("failed to create async runtime")?;
     let konnect = runtime.block_on(start_runtime(&forwards, config.proxy.port))?;
     let transfer_stats = konnect.transfer_stats();
@@ -263,6 +269,7 @@ pub fn run(config: Config) -> Result<()> {
         status_item: None,
         routes: HashMap::new(),
         active_routes: HashSet::new(),
+        raw_ports,
         transfer_stats,
         commands,
     }));
@@ -342,8 +349,11 @@ fn context_label(config: &Config, context: &str) -> String {
     format!("{name} ({context})")
 }
 
-fn active_url(route: &str, proxy_port: u16) -> String {
-    format!("http://{}:{proxy_port}", browser_host(route))
+fn active_url(route: &str, proxy_port: u16, raw_port: Option<u16>) -> String {
+    match raw_port {
+        Some(port) => format!("127.0.0.1:{port}"),
+        None => format!("http://{}:{proxy_port}", browser_host(route)),
+    }
 }
 
 fn copy_to_clipboard(value: &str) -> Result<()> {

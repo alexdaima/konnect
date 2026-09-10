@@ -10,6 +10,35 @@ konnect init  # Writes the config.example.json to ~/.konnect/config.json
 konnect  # Start Konnect
 ```
 
+## Raw TCP routes
+
+The named `<cluster>.<service>.localhost` routes all share one proxy port, so
+Konnect has to read the destination out of each connection to know where to send
+it. Only protocols that carry their destination can be routed this way — in
+practice, HTTP and its `Host` header. The PostgreSQL wire protocol, MySQL, Redis
+and plain TCP never send one, so those connections cannot use a shared port.
+
+Give such a service its own port with `local_port`:
+
+```json
+{
+  "name": "usa-postgres",
+  "namespace": "namespace",
+  "target": "svc/postgres",
+  "remote_port": 5432,
+  "local_port": 15432
+}
+```
+
+Konnect then listens on `127.0.0.1:15432` and relays it byte for byte, with
+nothing parsed. Point your client (TablePlus, `psql`, anything) straight at that
+port.
+
+`local_port` belongs on a specific cluster, not on `clusters.all` — every cluster
+would otherwise try to bind the same port. Give the same service a different port
+in each cluster, which is also what keeps `usa` and `china` distinguishable when
+the protocol offers no hostname to tell them apart.
+
 ## Configuration
 
 Konnect picks its configuration file in this order:
